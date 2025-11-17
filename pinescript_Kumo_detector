@@ -1,5 +1,5 @@
 //@version=5
-indicator("Ichimoku Kumo Strength Map — Weak/Strong Shades (Final Version)", overlay=true, max_labels_count=500, max_lines_count=500)
+indicator("Ichimoku Kumo Strength Map — Weak/Strong + Full Ichimoku (fixed)", overlay=true, max_labels_count=500, max_lines_count=500)
 
 //=== Inputs
 tenkanLen     = input.int(9,   "Tenkan (Conversion)", minval=1)
@@ -8,42 +8,54 @@ senkouBLen    = input.int(52,  "Senkou B Length",    minval=2)
 displacement  = input.int(26,  "Displacement (+forward)", minval=1)
 
 atrLen        = input.int(26,  "ATR Length for thickness", minval=1)
-weakTh        = input.float(0.6, "Weak if thickness/ATR <", step=0.05, minval=0.05)
-strongTh      = input.float(1.2, "Strong if thickness/ATR >", step=0.05, minval=0.1)
+weakTh        = input.float(0.6, "Weak if thickness/ATR <", step=0.05)
+strongTh      = input.float(1.2, "Strong if thickness/ATR >", step=0.05)
 
-twistLookback = input.int(10,  "Twist recent within (bars)", minval=1)
-flatTolMul    = input.float(0.05, "Flat Span B tolerance (× ATR)", step=0.01)
-minFlatBars   = input.int(20, "Min Flat B bars for Strong", minval=1)
+twistLookback = input.int(10, "Twist recent within (bars)")
+flatTolMul    = input.float(0.05, "Flat Span B tolerance × ATR", step=0.01)
+minFlatBars   = input.int(20, "Min Flat-B bars for Strong")
 
 useHTF        = input.bool(true, "Enable HTF confluence?")
 htfTf         = input.timeframe("240", "HTF timeframe")
-htfTolATR     = input.float(0.5, "HTF confluence tolerance × ATR", step=0.1)
+htfTolATR     = input.float(0.5, "HTF tolerance × ATR", step=0.1)
 
 showMarkers   = input.bool(true, "Show strength markers")
-paintCloud    = input.bool(true, "Paint the cloud")
+paintCloud    = input.bool(true, "Paint the Kumo")
 
-//=== Ichimoku Core
+//=== Show Ichimoku Lines
+showTenkan = input.bool(true, "Show Tenkan-sen")
+showKijun  = input.bool(true, "Show Kijun-sen")
+showChikou = input.bool(true, "Show Chikou Span")
+
+//=== Chikou anti-delay option
+useConfirmedChikou = input.bool(true, "Chikou pakai bar confirmed (anti-delay)?")
+
+//======================================
+// Ichimoku Core
+//======================================
 tenkan = (ta.highest(high, tenkanLen) + ta.lowest(low, tenkanLen)) / 2
 kijun  = (ta.highest(high, kijunLen)  + ta.lowest(low, kijunLen))  / 2
 spanA  = (tenkan + kijun) / 2
 spanB  = (ta.highest(high, senkouBLen) + ta.lowest(low, senkouBLen)) / 2
 
-//=== Thickness normalized
+//=== Thickness normalized (guard ATR)
 atr = ta.atr(atrLen)
-tn  = math.abs(spanA - spanB) / atr
+tn  = atr > 0 ? math.abs(spanA - spanB) / atr : na
 
-//=== Twist detection
+//=== Twist
 twistCond   = ta.cross(spanA, spanB)
 twistBars   = ta.barssince(twistCond)
 twistRecent = not na(twistBars) and twistBars <= twistLookback
 
-//=== Flat Span B
-flatTol       = atr * flatTolMul
-flatCondB     = math.abs(ta.change(spanB)) <= flatTol
-var flatCountB = 0
+//=== Flat Span B Counter (explicit int)
+var int flatCountB = 0
+flatTol   = atr * flatTolMul
+flatCondB = math.abs(ta.change(spanB)) <= flatTol
 flatCountB := flatCondB ? flatCountB + 1 : 0
 
-//=== HTF functions
+//======================================
+// HTF Functions & Confluence (anti-repaint)
+//======================================
 f_htfSpanA() =>
     _t = (ta.highest(high, tenkanLen) + ta.lowest(low, tenkanLen)) / 2
     _k = (ta.highest(high, kijunLen)  + ta.lowest(low, kijunLen))  / 2
@@ -52,54 +64,75 @@ f_htfSpanA() =>
 f_htfSpanB() =>
     (ta.highest(high, senkouBLen) + ta.lowest(low, senkouBLen)) / 2
 
-htfSpanA = useHTF ? request.security(syminfo.tickerid, htfTf, f_htfSpanA()) : na
-htfSpanB = useHTF ? request.security(syminfo.tickerid, htfTf, f_htfSpanB()) : na
+// Ambil masing-masing seri secara terpisah (kompatibel & anti-repaint)
+__htfA        = request.security(syminfo.tickerid, htfTf, f_htfSpanA(),       lookahead=barmerge.lookahead_off, gaps=barmerge.gaps_off)
+__htfB        = request.security(syminfo.tickerid, htfTf, f_htfSpanB(),       lookahead=barmerge.lookahead_off, gaps=barmerge.gaps_off)
+__htfConfirmed= request.security(syminfo.tickerid, htfTf, barstate.isconfirmed, lookahead=barmerge.lookahead_off, gaps=barmerge.gaps_off)
+
+// Pakai hanya data HTF yang sudah confirmed; matikan bila useHTF=false
+htfSpanA = useHTF and __htfConfirmed ? __htfA : na
+htfSpanB = useHTF and __htfConfirmed ? __htfB : na
 
 distA = useHTF and not na(htfSpanA) ? math.abs(spanA - htfSpanA) : na
 distB = useHTF and not na(htfSpanB) ? math.abs(spanB - htfSpanB) : na
+
 confluenceTol = atr * htfTolATR
 nearHTF = useHTF and not na(distA) and not na(distB) and math.min(distA, distB) <= confluenceTol
 
-//=== Strength Scoring
+//======================================
+// Strength Scoring
+//======================================
 scoreWeak   = (tn < weakTh ? 2 : 0) + (twistRecent ? 1 : 0) + (useHTF and not nearHTF ? 1 : 0)
 scoreStrong = (tn > strongTh ? 2 : 0) + (flatCountB >= minFlatBars ? 1 : 0) + (useHTF and nearHTF ? 1 : 0)
 
 isWeak   = scoreWeak   >= 2 and scoreWeak > scoreStrong
 isStrong = scoreStrong >= 2 and scoreStrong > scoreWeak
 
-//=== Plot Spans
-pA = plot(spanA, "Span A", color=color.gray, offset=displacement)
-pB = plot(spanB, "Span B", color=color.gray, offset=displacement)
+//======================================
+// Plot Kumo
+//======================================
+pA = plot(spanA, "Span A", color=color.gray, offset=displacement-1)
+pB = plot(spanB, "Span B", color=color.gray, offset=displacement-1)
 
-//===================================
-//  NEW COLOR DESIGN (Opsi B shades)
-//===================================
-
-// Bullish or Bearish baseline
+// NEW COLOR SYSTEM (Bull/Bear Shades)
 kumoBull = spanA > spanB
 
-// Bull shades
+// Bull
 bullStrong = color.rgb(0, 130, 0, 60)
 bullNormal = color.rgb(0, 170, 0, 70)
 bullWeak   = color.rgb(180, 220, 0, 70)
 
-// Bear shades
+// Bear
 bearStrong = color.rgb(180, 0, 0, 60)
 bearNormal = color.rgb(220, 0, 0, 70)
 bearWeak   = color.rgb(220, 120, 0, 70)
 
-// pick shade based on state
-// pick shade based on state  (harus satu baris di Pine)
+// Single-line ternary to avoid Pine error
 fillColor = isStrong ? (kumoBull ? bullStrong : bearStrong) : isWeak ? (kumoBull ? bullWeak : bearWeak) : (kumoBull ? bullNormal : bearNormal)
-
-
 fill(pA, pB, color = paintCloud ? fillColor : na)
 
-//=== Markers at Kumo mid
-kumoMid = (spanA + spanB) / 2
-plot(showMarkers and isWeak   ? kumoMid : na, "Weak",   style=plot.style_circles, offset=displacement, color=color.new(color.red, 0))
-plot(showMarkers and isStrong ? kumoMid : na, "Strong", style=plot.style_circles, offset=displacement, color=color.new(color.green, 0))
+//======================================
+// Ichimoku Lines (Tenkan, Kijun, Chikou)
+//======================================
+tenkanColor = color.rgb(200, 30, 30)
+kijunColor  = color.rgb(30, 70, 200)
+chikouColor = color.rgb(0, 160, 0)
 
-//=== Alerts
+// Tenkan & Kijun
+plot(showTenkan ? tenkan : na, "Tenkan-sen", color=tenkanColor, linewidth=2)
+plot(showKijun  ? kijun  : na, "Kijun-sen",  color=kijunColor,  linewidth=2)
+
+// Chikou Span (Lagging) — anti-delay option
+chikouSrc = useConfirmedChikou ? close[1] : close
+chikouOfs = useConfirmedChikou ? -(displacement) : -displacement
+plot(showChikou ? chikouSrc : na, "Chikou Span", color=chikouColor, offset=chikouOfs, linewidth=2, style=plot.style_linebr)
+
+//======================================
+// Strength Markers & Alerts
+//======================================
+kumoMid = (spanA + spanB) / 2
+plot(showMarkers and isWeak   ? kumoMid : na, "Weak Kumo Marker",   style=plot.style_circles, offset=displacement-1, color=color.red)
+plot(showMarkers and isStrong ? kumoMid : na, "Strong Kumo Marker", style=plot.style_circles, offset=displacement-1, color=color.green)
+
 alertcondition(isWeak,   "Weak Kumo Ahead",   "Weak Kumo detected ahead")
 alertcondition(isStrong, "Strong Kumo Ahead", "Strong Kumo detected ahead")
